@@ -60,21 +60,21 @@ def collate_fn(batch):
     return imgs, labels, boxes
 
 
-def iou_calc(pred_box, gt_box):
-    pred_x, pred_y = pred_box[:, :, :, :, 0], pred_box[:, :, :, :, 1]
-    pred_w, pred_h = pred_box[:, :, :, :, 2], pred_box[:, :, :, :, 3]
+def _iou_calc(pred_box, gt_box):
+    pred_x, pred_y = pred_box[0], pred_box[1]
+    pred_w, pred_h = pred_box[2], pred_box[3]
     gt_x, gt_y = gt_box[0], gt_box[1]
     gt_w, gt_h = gt_box[2], gt_box[3]
 
     # 计算交集的左上角和右下角的x,y坐标
-    inter_x1 = paddle.maximum(pred_x - pred_w / 2, gt_x - gt_w / 2)
-    inter_y1 = paddle.maximum(pred_y - pred_h / 2, gt_y - gt_h / 2)
-    inter_x2 = paddle.minimum(pred_x + pred_w / 2, gt_x + gt_w / 2)
-    inter_y2 = paddle.minimum(pred_y + pred_h / 2, gt_y + gt_h / 2)
+    inter_x1 = max(pred_x - pred_w / 2, gt_x - gt_w / 2)
+    inter_y1 = max(pred_y - pred_h / 2, gt_y - gt_h / 2)
+    inter_x2 = min(pred_x + pred_w / 2, gt_x + gt_w / 2)
+    inter_y2 = min(pred_y + pred_h / 2, gt_y + gt_h / 2)
 
     # 计算交集的面积
-    inter_w = paddle.maximum(0, inter_x2 - inter_x1)
-    inter_h = paddle.maximum(0, inter_y2 - inter_y1)
+    inter_w = max(0, inter_x2 - inter_x1)
+    inter_h = max(0, inter_y2 - inter_y1)
     inter_area = inter_w * inter_h
 
     # 计算并集的面积
@@ -85,14 +85,26 @@ def iou_calc(pred_box, gt_box):
     return inter_area / (union_area + 1e-10)
 
 def preprocessor(labels, boxes, s, b, c, pred_boxes):
+    # pred_boxes: [batch, s, s, b * 5 + c]
+    device = 'cuda' if paddle.cuda.is_available() else 'cpu'
     batch_size = len(labels)
-    targets = paddle.zeros([batch_size, s, s, b * 5 + c])
+    targets = paddle.zeros([batch_size, s, s, b * 5 + c]).to(device)
 
     # 遍历每个样本， 获取类别和锚框坐标
     for i in range(batch_size):
-        for j in range(labels[i]):  # 遍历每个样本的所有物体
-            cls = labels[i][j].item()
-            x, y, w, h = boxes[i][j]
+        if len(labels[i]) == 0:  # 当前样本无物体则跳过
+            continue
+        sample_labels, sample_boxes = labels[i], boxes[i]
+        if not isinstance(sample_labels, paddle.Tensor):
+            sample_labels = paddle.to_tensor(sample_labels)
+        if not isinstance(sample_boxes, paddle.Tensor):
+            sample_boxes = paddle.to_tensor(sample_boxes)
+
+        sample_labels, sample_boxes = sample_labels.to(device), sample_boxes.to(device)
+
+        for j in range(sample_labels.shape[0]):  # 遍历每个样本的所有物体
+            cls = sample_labels[j].item()
+            x, y, w, h = sample_boxes[j]
 
             """物体所属网格索引
             绝对坐标列索引：grid_x = int(center_x / grid_w), grid_w = w / s
@@ -100,12 +112,16 @@ def preprocessor(labels, boxes, s, b, c, pred_boxes):
             """
             grid_x, grid_y = int(x * s), int(y * s)
 
+            if grid_x >= s: grid_x = s-1
+            if grid_y >= s: grid_y = s-1
+
             # 计算锚框的中心坐标相对于网格的坐标（局部归一化坐标）
             x_grid, y_grid = x * s - grid_x, y * s - grid_y
 
             # 根据IOU选择边界框预测器
-            ious = iou_calc(pred_boxes[i, grid_y, grid_x, :4], paddle.tensor([x, y, w, h]))
-            best_pred_idx = paddle.argmax(ious).item()  # 选择IOU最大的锚框的索引
+            iou_1 = _iou_calc(pred_boxes[i, grid_y, grid_x, :4], paddle.tensor([x, y, w, h]))
+            iou_2 = _iou_calc(pred_boxes[i, grid_y, grid_x, 5:9], paddle.tensor([x, y, w, h]))
+            best_pred_idx = 0 if iou_1 >= iou_2 else 1  # 选择IOU最大的锚框的索引
 
             # 填充边界框部分（x, y, w, h, conf）
             targets[i, grid_y, grid_x, best_pred_idx * 5: best_pred_idx * 5 + 4] = paddle.tensor([x_grid, y_grid, w, h])

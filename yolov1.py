@@ -140,20 +140,20 @@ class YoloLoss(nn.Layer):
         target_w = target_box[:, :, :, :, 2]
         target_h = target_box[:, :, :, :, 3]
 
-        center_loss = nn.MSELoss()(pred_x, target_x) + nn.MSELoss()(pred_y, target_y)
-        wh_loss = nn.MSELoss()(paddle.sqrt(pred_w), paddle.sqrt(target_w)) + nn.MSELoss()(paddle.sqrt(pred_h), paddle.sqrt(target_h))
+        center_loss = paddle.mean((pred_x - target_x) ** 2) + paddle.mean((pred_y - target_y) ** 2)
+        wh_loss = paddle.mean((paddle.sqrt(paddle.abs(pred_w)) - paddle.sqrt(paddle.abs(target_w))) ** 2) + paddle.mean((paddle.sqrt(paddle.abs(pred_h)) - paddle.sqrt(paddle.abs(target_h))) ** 2)
         coord_loss = self.lambda_coord * (center_loss + wh_loss)
 
         pred_conf = pred_box[:, :, :, :, 4]
         target_conf = target_box[:, :, :, :, 4]
         conf_mask_obj = (target_conf == 1).astype('float32')
         conf_mask_noobj = (target_conf == 0).astype('float32')
-        conf_loss_obj = nn.MSELoss()(pred_conf, target_conf) * conf_mask_obj
-        conf_loss_noobj = self.lambda_noobj * nn.MSELoss()(pred_conf, target_conf) * conf_mask_noobj
+        conf_loss_obj = paddle.mean(((pred_conf - target_conf) ** 2) * conf_mask_obj)
+        conf_loss_noobj = self.lambda_noobj * paddle.mean(((pred_conf - target_conf) ** 2) * conf_mask_noobj)
         conf_loss = conf_loss_obj + conf_loss_noobj
 
-        cls_mask_obj = (paddle.max(target_conf, axis=-1) == 1).astype('float32')  # [batch, 7, 7, 1]
-        cls_loss = nn.MSELoss()(pred_cls, target_cls) * cls_mask_obj
+        cls_mask_obj = (paddle.max(target_conf, axis=-1) == 1).astype('float32').unsqueeze(-1)  # [batch, 7, 7, 1]
+        cls_loss = paddle.mean(((pred_cls - target_cls) ** 2) * cls_mask_obj)
 
         total_loss = coord_loss + conf_loss + cls_loss
         return total_loss
