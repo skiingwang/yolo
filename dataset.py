@@ -37,6 +37,7 @@ class YoloDataset(Dataset):
                     for line in f:
                         parts = line.strip().split(' ')
                         if len(parts) == 5:
+                            # [类别，全局归一化x坐标，全局归一化y坐标，全局归一化宽度，全局归一化高度]
                             cls, x, y, w, h = map(float, parts)
                             labels.append(int(cls))
                             boxes.append([x, y, w, h])
@@ -57,3 +58,60 @@ def collate_fn(batch):
     imgs, labels, boxes = zip(*batch)
     imgs = paddle.stack(imgs, axis=0)
     return imgs, labels, boxes
+
+
+def iou_calc(pred_box, gt_box):
+    pred_x, pred_y = pred_box[:, :, :, :, 0], pred_box[:, :, :, :, 1]
+    pred_w, pred_h = pred_box[:, :, :, :, 2], pred_box[:, :, :, :, 3]
+    gt_x, gt_y = gt_box[0], gt_box[1]
+    gt_w, gt_h = gt_box[2], gt_box[3]
+
+    # 计算交集的左上角和右下角的x,y坐标
+    inter_x1 = paddle.maximum(pred_x - pred_w / 2, gt_x - gt_w / 2)
+    inter_y1 = paddle.maximum(pred_y - pred_h / 2, gt_y - gt_h / 2)
+    inter_x2 = paddle.minimum(pred_x + pred_w / 2, gt_x + gt_w / 2)
+    inter_y2 = paddle.minimum(pred_y + pred_h / 2, gt_y + gt_h / 2)
+
+    # 计算交集的面积
+    inter_w = paddle.maximum(0, inter_x2 - inter_x1)
+    inter_h = paddle.maximum(0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+
+    # 计算并集的面积
+    pred_area = pred_w * pred_h
+    gt_area = gt_w * gt_h
+    union_area = pred_area + gt_area - inter_area
+
+    return inter_area / (union_area + 1e-10)
+
+def preprocessor(labels, boxes, s, b, c, pred_boxes):
+    batch_size = len(labels)
+    targets = paddle.zeros([batch_size, s, s, b * 5 + c])
+
+    # 遍历每个样本， 获取类别和锚框坐标
+    for i in range(batch_size):
+        for j in range(labels[i]):  # 遍历每个样本的所有物体
+            cls = labels[i][j].item()
+            x, y, w, h = boxes[i][j]
+
+            """物体所属网格索引
+            绝对坐标列索引：grid_x = int(center_x / grid_w), grid_w = w / s
+            相对坐标列索引：grid_x = int(x / (grid_w / w)) = int(x / (1 / s)), x = center_x / w
+            """
+            grid_x, grid_y = int(x * s), int(y * s)
+
+            # 计算锚框的中心坐标相对于网格的坐标（局部归一化坐标）
+            x_grid, y_grid = x * s - grid_x, y * s - grid_y
+
+            # 根据IOU选择边界框预测器
+            ious = iou_calc(pred_boxes[i, grid_y, grid_x, :4], paddle.tensor([x, y, w, h]))
+            best_pred_idx = paddle.argmax(ious).item()  # 选择IOU最大的锚框的索引
+
+            # 填充边界框部分（x, y, w, h, conf）
+            targets[i, grid_y, grid_x, best_pred_idx * 5: best_pred_idx * 5 + 4] = paddle.tensor([x_grid, y_grid, w, h])
+            targets[i, grid_y, grid_x, best_pred_idx * 5 + 4] = 1.0  # conf=1（表示有物体）
+
+            # 填充类别部分（one-hot编码）
+            targets[i, grid_y, grid_x, b * 5 + cls] = 1.0  # 对应类别的位置设为1
+
+    return targets
