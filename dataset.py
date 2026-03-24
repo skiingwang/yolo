@@ -67,14 +67,14 @@ def _iou_calc(pred_box, gt_box):
     gt_w, gt_h = gt_box[2], gt_box[3]
 
     # 计算交集的左上角和右下角的x,y坐标
-    inter_x1 = max(pred_x - pred_w / 2, gt_x - gt_w / 2)
-    inter_y1 = max(pred_y - pred_h / 2, gt_y - gt_h / 2)
-    inter_x2 = min(pred_x + pred_w / 2, gt_x + gt_w / 2)
-    inter_y2 = min(pred_y + pred_h / 2, gt_y + gt_h / 2)
+    inter_x1 = paddle.max(paddle.to_tensor([pred_x - pred_w / 2, gt_x - gt_w / 2]))
+    inter_y1 = paddle.max(paddle.to_tensor([pred_y - pred_h / 2, gt_y - gt_h / 2]))
+    inter_x2 = paddle.min(paddle.to_tensor([pred_x + pred_w / 2, gt_x + gt_w / 2]))
+    inter_y2 = paddle.min(paddle.to_tensor([pred_y + pred_h / 2, gt_y + gt_h / 2]))
 
     # 计算交集的面积
-    inter_w = max(0, inter_x2 - inter_x1)
-    inter_h = max(0, inter_y2 - inter_y1)
+    inter_w = paddle.max(paddle.to_tensor([0, inter_x2 - inter_x1]))
+    inter_h = paddle.max(paddle.to_tensor([0, inter_y2 - inter_y1]))
     inter_area = inter_w * inter_h
 
     # 计算并集的面积
@@ -121,10 +121,10 @@ def preprocessor(labels, boxes, s, b, c, pred_boxes):
             # 根据IOU选择边界框预测器
             iou_1 = _iou_calc(pred_boxes[i, grid_y, grid_x, :4], paddle.tensor([x, y, w, h]))
             iou_2 = _iou_calc(pred_boxes[i, grid_y, grid_x, 5:9], paddle.tensor([x, y, w, h]))
-            best_pred_idx = 0 if iou_1 >= iou_2 else 1  # 选择IOU最大的锚框的索引
+            best_pred_idx = int(paddle.argmax(paddle.to_tensor([iou_1, iou_2])).item())  # 选择IOU最大的锚框的索引
 
             # 填充边界框部分（x, y, w, h, conf）
-            targets[i, grid_y, grid_x, best_pred_idx * 5: best_pred_idx * 5 + 4] = paddle.tensor([x_grid, y_grid, w, h])
+            targets[i, grid_y, grid_x, best_pred_idx * 5 : best_pred_idx * 5 + 4] = paddle.tensor([x_grid, y_grid, w, h])
             targets[i, grid_y, grid_x, best_pred_idx * 5 + 4] = 1.0  # conf=1（表示有物体）
 
             # 填充类别部分（one-hot编码）
