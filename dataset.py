@@ -60,7 +60,7 @@ def collate_fn(batch):
     return imgs, labels, boxes
 
 
-def _iou_calc(pred_box, gt_box):
+def iou_calc(pred_box, gt_box):
     pred_x, pred_y = pred_box[0], pred_box[1]
     pred_w, pred_h = pred_box[2], pred_box[3]
     gt_x, gt_y = gt_box[0], gt_box[1]
@@ -119,9 +119,9 @@ def preprocessor(labels, boxes, s, b, c, pred_boxes):
             x_grid, y_grid = x * s - grid_x, y * s - grid_y
 
             # 根据IOU选择边界框预测器
-            iou_1 = _iou_calc(pred_boxes[i, grid_y, grid_x, :4], paddle.tensor([x, y, w, h]))
-            iou_2 = _iou_calc(pred_boxes[i, grid_y, grid_x, 5:9], paddle.tensor([x, y, w, h]))
-            best_pred_idx = int(paddle.argmax(paddle.to_tensor([iou_1, iou_2])).item())  # 选择IOU最大的锚框的索引
+            iou_1 = iou_calc(pred_boxes[i, grid_y, grid_x, :4], paddle.tensor([x, y, w, h]))
+            iou_2 = iou_calc(pred_boxes[i, grid_y, grid_x, 5:9], paddle.tensor([x, y, w, h]))
+            best_pred_idx = paddle.argmax(paddle.to_tensor([iou_1, iou_2])).item()  # 选择IOU最大的锚框的索引
 
             # 填充边界框部分（x, y, w, h, conf）
             targets[i, grid_y, grid_x, best_pred_idx * 5 : best_pred_idx * 5 + 4] = paddle.tensor([x_grid, y_grid, w, h])
@@ -130,4 +130,4 @@ def preprocessor(labels, boxes, s, b, c, pred_boxes):
             # 填充类别部分（one-hot编码）
             targets[i, grid_y, grid_x, b * 5 + cls] = 1.0  # 对应类别的位置设为1
 
-    return targets
+    return targets  # [batch, s, s, b * 5 + c]

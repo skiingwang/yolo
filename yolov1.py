@@ -10,32 +10,14 @@ if TYPE_CHECKING:
 __all__ = []
 
 class BasicConvLayer(nn.Layer):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0):
         super().__init__()
-        self.conv = nn.Conv2D(in_channels, out_channels, kernel_size=1, stride=1)
-        self.relu = nn.LeakyReLU()
+        self.conv = nn.Conv2D(in_channels, out_channels, kernel_size, stride, padding, bias=False)
+        self.relu = nn.LeakyReLU(0.1)
 
     def forward(self, x):
         x = self.conv(x)
         x = self.relu(x)
-        return x
-
-class ConvPoolLayer(nn.Layer):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, use_basic=False, basic_incs=None, basic_outcs=None):
-        super().__init__()
-        self.use_basic = use_basic
-        if use_basic:
-            self.basic_conv = BasicConvLayer(basic_incs, basic_outcs)
-        self.conv = nn.Conv2D(in_channels, out_channels, kernel_size, stride, padding)
-        self.relu = nn.LeakyReLU()
-        self.pool = nn.MaxPool2D(kernel_size=2, stride=2)
-
-    def forward(self, x):
-        if self.use_basic:
-            x = self.basic_conv(x)
-        x = self.conv(x)
-        x = self.relu(x)
-        x = self.pool(x)
         return x
 
 """YOLOv1模型
@@ -51,65 +33,71 @@ confidence：目标物体的置信度，Pr(obj)*IOU，范围为[0, 1]。
 """
 
 class Yolo1(nn.Layer):
-    def __init__(self, num_classes=20, num_boxes=2):
+    def __init__(self, in_channels=3, split_size=7, num_classes=20, num_boxes=2):
         super().__init__()
         self.num_classes = num_classes
         self.num_boxes = num_boxes
-        self.s = 7  # 网格大小 7x7
-
-        self.backbone = nn.Sequential(
-            # Inputs: 448x448x3
-            ConvPoolLayer(3, 64, 7, 2, 3),  # 448 -> 224
-            ConvPoolLayer(64, 192, 3, 1, 1),  # 224 -> 112
-
-            BasicConvLayer(192, 128),
-            nn.Conv2D(128, 256, 3, 1, 1),
-            nn.LeakyReLU(),
-            ConvPoolLayer(256, 512, 3, 1, 1, True, 256, 256),  # 112 -> 56
-
-            BasicConvLayer(512, 256),
-            nn.Conv2D(256, 512, 3, 1, 1),
-            nn.LeakyReLU(),
-            BasicConvLayer(512, 256),
-            nn.Conv2D(256, 512, 3, 1, 1),
-            nn.LeakyReLU(),
-            BasicConvLayer(512, 256),
-            nn.Conv2D(256, 512, 3, 1, 1),
-            nn.LeakyReLU(),
-            BasicConvLayer(512, 256),
-            nn.Conv2D(256, 512, 3, 1, 1),  # 56 -> 28
-            nn.LeakyReLU(),
-            ConvPoolLayer(512, 1024, 3, 1, 1, True, 512, 512),  # 28 -> 14
-
-            BasicConvLayer(1024, 512),
-            nn.Conv2D(512, 1024, 3, 1, 1),
-            nn.LeakyReLU(),
-            BasicConvLayer(1024, 512),
-            nn.Conv2D(512, 1024, 3, 1, 1),
-            nn.LeakyReLU(),
-            nn.Conv2D(1024, 1024, 3, 1, 1),
-            nn.LeakyReLU(),
-            nn.Conv2D(1024, 1024, 3, 2, 1),  # 14 -> 7
-            nn.LeakyReLU(),
-
-            nn.Conv2D(1024, 1024, 3, 1, 1),
-            nn.LeakyReLU(),
-            nn.Conv2D(1024, 1024, 3, 1, 1),  # 7 -> 7
-            nn.LeakyReLU()
-        )
-
-        self.head = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(1024 * 7 * 7, 4096),
-            nn.LeakyReLU(),
-            nn.Dropout(),
-            nn.Linear(4096, self.s * self.s * (self.num_boxes * 5 + self.num_classes))  # 1470
-        )
+        self.s = split_size  # 网格大小 7x7
+        self.network_cfg = [
+            (64, 7, 2, 3),
+            'M',
+            (192, 3, 1, 1),
+            'M',
+            (128, 1, 1, 0),
+            (256, 3, 1, 1),
+            (256, 1, 1, 0),
+            (512, 3, 1, 1),
+            'M',
+            [
+                (256, 1, 1, 0),
+                (512, 3, 1, 1),
+                4
+            ],
+            (512, 1, 1, 0),
+            (1024, 3, 1, 1),
+            'M',
+            [
+                (512, 1, 1, 0),
+                (1024, 3, 1, 1),
+                2
+            ],
+            (1024, 3, 1, 1),
+            (1024, 3, 2, 1),
+            (1024, 3, 1, 1),
+            (1024, 3, 1, 1),
+        ]
+        self.backbone = self._build_backbone(self.network_cfg, in_channels)
+        self.head = self._build_head()
 
     def forward(self, x):
         x = self.backbone(x)
         x = self.head(x)
         return x.reshape([-1, self.s, self.s, self.num_boxes * 5 + self.num_classes])  # [batch, 7, 7, 30]
+
+    def _build_backbone(self, cfg, in_channels):
+        backbone = []
+        for c in cfg:
+            match c:
+                case tuple():
+                    backbone.append(BasicConvLayer(in_channels, c[0], c[1], c[2], c[3]))
+                    in_channels = c[0]
+                case str():
+                    backbone.append(nn.MaxPool2D(kernel_size=2, stride=2))
+                case list():
+                    for _ in range(c[2]):
+                        backbone.append(BasicConvLayer(in_channels, c[0][0], c[0][1], c[0][2], c[0][3]))
+                        backbone.append(BasicConvLayer(c[0][0], c[1][0], c[1][1], c[1][2], c[1][3]))
+                        in_channels = c[1][0]
+        return nn.Sequential(*backbone)
+
+    def _build_head(self):
+        return nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(1024 * self.s * self.s, 4096),
+            nn.Dropout(),
+            nn.LeakyReLU(0.1),
+            nn.Linear(4096, self.s * self.s * (self.num_boxes * 5 + self.num_classes))  # 1470
+        )
 
 # YOLOv1损失函数
 class YoloLoss(nn.Layer):
@@ -123,38 +111,40 @@ class YoloLoss(nn.Layer):
 
     def forward(self, pred, target):
         # pred: [batch, 7, 7, b*5+c]
-        pred_box = pred[:, :, :, :self.b*5].reshape([-1, self.s, self.s, self.b, 5])  # [batch, 7, 7, 2, 5]
-        pred_cls = pred[:, :, :, self.b*5:].reshape([-1, self.s, self.s, self.c])  # [batch, 7, 7, 20]
+        pred_box = pred[..., :self.b*5].reshape([-1, self.s, self.s, self.b, 5])  # [batch, 7, 7, 2, 5]
+        pred_cls = pred[..., self.b*5:]  # [batch, 7, 7, 20]
+        # target: [batch, 7, 7, b*5+c]
+        target_box = target[..., :self.b*5].reshape([-1, self.s, self.s, self.b, 5])  # [batch, 7, 7, 2, 5]
+        target_cls = target[..., self.b*5:]  # [batch, 7, 7, 20]
 
-        # target: [batch, 7, 7, 5]
-        target_box = target[:, :, :, :self.b*5].reshape([-1, self.s, self.s, self.b, 5])  # [batch, 7, 7, 2, 5]
-        target_cls = target[:, :, :, self.b*5:].reshape([-1, self.s, self.s, self.c])  # [batch, 7, 7, 20]
+        # [batch, 7, 7, 2]
+        pred_x, pred_y = pred_box[..., 0], pred_box[..., 1]
+        pred_w, pred_h = pred_box[..., 2], pred_box[..., 3]
+        # [batch, 7, 7, 2]
+        target_x, target_y = target_box[..., 0], target_box[..., 1]
+        target_w, target_h = target_box[..., 2], target_box[..., 3]
+        # [batch, 7, 7, 2]
+        pred_conf, target_conf = pred_box[..., 4], target_box[..., 4]
 
-        pred_x = pred_box[:, :, :, :, 0]
-        pred_y = pred_box[:, :, :, :, 1]
-        pred_w = pred_box[:, :, :, :, 2]
-        pred_h = pred_box[:, :, :, :, 3]
+        # 计算中心坐标损失：[batch, 7, 7, 2]
+        center_loss = self.lambda_coord * (((pred_x - target_x) ** 2 + (pred_y - target_y) ** 2)).sum()
+        # 计算宽度和高度损失：[batch, 7, 7, 2]
+        wh_loss = self.lambda_coord * (((paddle.sqrt(paddle.abs(pred_w)) - paddle.sqrt(target_w)) ** 2 + (paddle.sqrt(paddle.abs(pred_h)) - paddle.sqrt(target_h)) ** 2)).sum()
+        # 计算坐标损失：
+        coord_loss = center_loss + wh_loss
+        # 计算置信度损失：mask_obj.shape=[batch, 7, 7, 2], mask_obj:paddle.Tensor[bool]
+        mask_obj, mask_noobj = target_conf > 0, target_conf == 0
+        # target_conf[mask_obj]：过滤出有物体的Grid，维度=标注框数量
+        conf_obj_loss = ((pred_conf[mask_obj] - target_conf[mask_obj]) ** 2).sum()
+        # target_conf[mask_noobj]：过滤出无物体的Grid，维度=7*7-标注框数量
+        conf_noobj_loss = self.lambda_noobj * ((pred_conf[mask_noobj] - target_conf[mask_noobj]) ** 2).sum()
+        conf_loss = conf_obj_loss + conf_noobj_loss
 
-        target_x = target_box[:, :, :, :, 0]
-        target_y = target_box[:, :, :, :, 1]
-        target_w = target_box[:, :, :, :, 2]
-        target_h = target_box[:, :, :, :, 3]
-
-        center_loss = paddle.mean((pred_x - target_x) ** 2) + paddle.mean((pred_y - target_y) ** 2)
-        wh_loss = paddle.mean((paddle.sqrt(paddle.abs(pred_w)) - paddle.sqrt(paddle.abs(target_w))) ** 2) + paddle.mean((paddle.sqrt(paddle.abs(pred_h)) - paddle.sqrt(paddle.abs(target_h))) ** 2)
-        coord_loss = self.lambda_coord * (center_loss + wh_loss)
-
-        pred_conf = pred_box[:, :, :, :, 4]
-        target_conf = target_box[:, :, :, :, 4]
-        conf_mask_obj = (target_conf == 1).astype('float32')
-        conf_mask_noobj = (target_conf == 0).astype('float32')
-        conf_loss_obj = paddle.mean(((pred_conf - target_conf) ** 2) * conf_mask_obj)
-        conf_loss_noobj = self.lambda_noobj * paddle.mean(((pred_conf - target_conf) ** 2) * conf_mask_noobj)
-        conf_loss = conf_loss_obj + conf_loss_noobj
-
-        cls_mask_obj = (paddle.max(target_conf, axis=-1) == 1).astype('float32').unsqueeze(-1)  # [batch, 7, 7, 1]
-        cls_loss = paddle.mean(((pred_cls - target_cls) ** 2) * cls_mask_obj)
+        # 计算类别损失
+        cls_mask_obj = mask_obj.any(axis=-1)  #每个Grid中，B个预测框只要有一个有物体，则计算CLS损失，cls_mask_obj为True，[batch, 7, 7]
+        cls_loss = ((pred_cls[cls_mask_obj] - target_cls[cls_mask_obj])**2).sum()
 
         total_loss = coord_loss + conf_loss + cls_loss
+        print(f'total_loss={total_loss}')
         return total_loss
 
