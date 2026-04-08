@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from utils import read_yaml
 import paddle, paddle.nn as nn
 
 if TYPE_CHECKING:
@@ -8,6 +9,9 @@ if TYPE_CHECKING:
     from typing import Tuple
 
 __all__ = []
+
+
+MODEL_CONFIG = read_yaml('./config.yaml')
 
 class BasicConvLayer(nn.Layer):
     def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0):
@@ -33,7 +37,7 @@ confidence：目标物体的置信度，Pr(obj)*IOU，范围为[0, 1]。
 """
 
 class Yolo1(nn.Layer):
-    def __init__(self, in_channels=3, split_size=7, num_classes=20, num_boxes=2):
+    def __init__(self, in_channels=3, split_size=MODEL_CONFIG['MODEL']['SPLIT_SIZE'], num_classes=MODEL_CONFIG['MODEL']['NUM_CLASSES'], num_boxes=MODEL_CONFIG['MODEL']['NUM_BOXES']):
         super().__init__()
         self.num_classes = num_classes
         self.num_boxes = num_boxes
@@ -101,7 +105,7 @@ class Yolo1(nn.Layer):
 
 # YOLOv1损失函数
 class YoloLoss(nn.Layer):
-    def __init__(self, s=7, b=2, c=20, lambda_coord=5, lambda_noobj=0.5):
+    def __init__(self, s=MODEL_CONFIG['MODEL']['SPLIT_SIZE'], b=MODEL_CONFIG['MODEL']['NUM_BOXES'], c=MODEL_CONFIG['MODEL']['NUM_CLASSES'], lambda_coord=5, lambda_noobj=0.5):
         super().__init__()
         self.s = s
         self.b = b

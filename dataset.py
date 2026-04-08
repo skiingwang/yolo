@@ -1,10 +1,12 @@
 ﻿import os, numpy as np, paddle, pathlib
 from PIL import Image
 from paddle.io import Dataset
+from utils import read_yaml
 
+DATASET_CONFIG = read_yaml('./config.yaml')
 
 class YoloDataset(Dataset):
-    def __init__(self, data_path, fmt='txt', split='train', transform=None):
+    def __init__(self, data_path=DATASET_CONFIG['DATASET']['PATH'], fmt='txt', split='train', transform=None):
         self.data_path = data_path
         self.fmt = fmt
         self.transform = transform
@@ -107,27 +109,30 @@ def preprocessor(labels, boxes, s, b, c, pred_boxes):
             x, y, w, h = sample_boxes[j]
 
             """物体所属网格索引
-            绝对坐标列索引：grid_x = int(center_x / grid_w), grid_w = w / s
-            相对坐标列索引：grid_x = int(x / (grid_w / w)) = int(x / (1 / s)), x = center_x / w
+            绝对坐标列索引：grid_j = int(cx_p / grid_size_w), grid_size_w = w / s
+            相对坐标列索引：grid_j = int(x / (grid_size_w / w)) = int(x / (1 / s)), x = cx_p / w
+            x * s 代表目标物体的中心坐标以网格尺寸为单位的相对坐标
             """
-            grid_x, grid_y = int(x * s), int(y * s)
+            grid_i, grid_j = int(y * s), int(x * s)
 
-            if grid_x >= s: grid_x = s-1
-            if grid_y >= s: grid_y = s-1
+            if grid_i >= s: grid_i = s-1
+            if grid_j >= s: grid_j = s-1
 
             # 计算锚框的中心坐标相对于网格的坐标（局部归一化坐标）
-            x_grid, y_grid = x * s - grid_x, y * s - grid_y
+            x_grid, y_grid = x * s - grid_j, y * s - grid_i
+            # 计算锚框的宽度和高度相对于网格的尺寸（局部归一化尺寸）
+            w_grid, h_grid = w * s, h * s  # w * s 代表目标物体的宽度以网格尺寸为单位的相对坐标
 
             # 根据IOU选择边界框预测器
-            iou_1 = iou_calc(pred_boxes[i, grid_y, grid_x, :4], paddle.tensor([x, y, w, h]))
-            iou_2 = iou_calc(pred_boxes[i, grid_y, grid_x, 5:9], paddle.tensor([x, y, w, h]))
+            iou_1 = iou_calc(pred_boxes[i, grid_i, grid_j, :4], paddle.tensor([x, y, w, h]))
+            iou_2 = iou_calc(pred_boxes[i, grid_i, grid_j, 5:9], paddle.tensor([x, y, w, h]))
             best_pred_idx = paddle.argmax(paddle.to_tensor([iou_1, iou_2])).item()  # 选择IOU最大的锚框的索引
 
             # 填充边界框部分（x, y, w, h, conf）
-            targets[i, grid_y, grid_x, best_pred_idx * 5 : best_pred_idx * 5 + 4] = paddle.tensor([x_grid, y_grid, w, h])
-            targets[i, grid_y, grid_x, best_pred_idx * 5 + 4] = 1.0  # conf=1（表示有物体）
+            targets[i, grid_i, grid_j, best_pred_idx * 5 : best_pred_idx * 5 + 4] = paddle.tensor([x_grid, y_grid, w, h])
+            targets[i, grid_i, grid_j, best_pred_idx * 5 + 4] = 1.0  # conf=1（表示有物体）
 
             # 填充类别部分（one-hot编码）
-            targets[i, grid_y, grid_x, b * 5 + cls] = 1.0  # 对应类别的位置设为1
+            targets[i, grid_i, grid_j, b * 5 + cls] = 1.0  # 对应类别的位置设为1
 
     return targets  # [batch, s, s, b * 5 + c]
