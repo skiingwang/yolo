@@ -88,7 +88,7 @@ def preprocessor(labels, boxes):
             targets[grid_i, grid_j, 1:5] = paddle.tensor([x_grid, y_grid, w_grid, h_grid])  # 填充锚框的中心坐标和尺寸（局部归一化边界框）
             targets[grid_i, grid_j, 5+cls] = 1  # 对应类别的位置设为1
 
-    return targets
+    return targets  # [s, s, [conf, x, y, w, h, cls1, cls2, ...]]
 
 def img_scale(w, h):
     return paddle.vision.transforms.Compose([

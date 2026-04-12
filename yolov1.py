@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from utils import read_yaml
+from utils import read_yaml, calc_iou
 import paddle, paddle.nn as nn
 
 if TYPE_CHECKING:
@@ -76,7 +76,7 @@ class Yolo1(nn.Layer):
     def forward(self, x):
         x = self.backbone(x)
         x = self.head(x)
-        return x.reshape([-1, self.s, self.s, self.num_boxes * 5 + self.num_classes])  # [batch, 7, 7, 30]
+        return x.reshape([-1, self.s, self.s, self.num_boxes * 5 + self.num_classes])  # [batch, 7, 7, SBC]
 
     def _build_backbone(self, cfg, in_channels):
         backbone = []
@@ -103,6 +103,7 @@ class Yolo1(nn.Layer):
             nn.Linear(4096, self.s * self.s * (self.num_boxes * 5 + self.num_classes))  # 1470
         )
 
+
 # YOLOv1损失函数
 class YoloLoss(nn.Layer):
     def __init__(self, s=MODEL_CONFIG['MODEL']['SPLIT_SIZE'], b=MODEL_CONFIG['MODEL']['NUM_BOXES'], c=MODEL_CONFIG['MODEL']['NUM_CLASSES'], lambda_coord=5, lambda_noobj=0.5):
@@ -112,23 +113,24 @@ class YoloLoss(nn.Layer):
         self.c = c
         self.lambda_coord = lambda_coord
         self.lambda_noobj = lambda_noobj
+        self.sse = nn.MSELoss(reduction='sum')
 
-    def forward(self, pred, target):
-        # pred: [batch, 7, 7, b*5+c]
-        pred_box = pred[..., :self.b*5].reshape([-1, self.s, self.s, self.b, 5])  # [batch, 7, 7, 2, 5]
-        pred_cls = pred[..., self.b*5:]  # [batch, 7, 7, 20]
-        # target: [batch, 7, 7, b*5+c]
-        target_box = target[..., :self.b*5].reshape([-1, self.s, self.s, self.b, 5])  # [batch, 7, 7, 2, 5]
-        target_cls = target[..., self.b*5:]  # [batch, 7, 7, 20]
+    def forward(self, preds, labels):
+
+        sum_loss = 0
+
+        # labels: [batch, 7, 7, SBC]
+        labels_box = labels[..., 1:5]  # [batch, 7, 7, 2, 5]
+        labels_cls = labels[..., 10:]  # [batch, 7, 7, 20]
+
+        # preds: [batch, 7, 7, SBC]
+        pred_box1 = preds[..., 1:5]  # [batch, 7, 7, 2, 5]
+        pred_box2 = preds[..., 5:10]  # [batch, 7, 7, 2, 10]
+        pred_cls = preds[..., 10:]  # [batch, 7, 7, 20]
 
         # [batch, 7, 7, 2]
-        pred_x, pred_y = pred_box[..., 0], pred_box[..., 1]
-        pred_w, pred_h = pred_box[..., 2], pred_box[..., 3]
-        # [batch, 7, 7, 2]
-        target_x, target_y = target_box[..., 0], target_box[..., 1]
-        target_w, target_h = target_box[..., 2], target_box[..., 3]
-        # [batch, 7, 7, 2]
-        pred_conf, target_conf = pred_box[..., 4], target_box[..., 4]
+        iou1 = calc_iou(pred_box1, labels_box)
+        iou2 = calc_iou(pred_box2, labels_box)
 
         # 计算中心坐标损失：[batch, 7, 7, 2]
         center_loss = self.lambda_coord * (((pred_x - target_x) ** 2 + (pred_y - target_y) ** 2)).sum()
@@ -151,27 +153,3 @@ class YoloLoss(nn.Layer):
         total_loss = coord_loss + conf_loss + cls_loss
         print(f'total_loss={total_loss}')
         return total_loss
-
-def iou_calc(pred_box, gt_box):
-    pred_x, pred_y = pred_box[0], pred_box[1]
-    pred_w, pred_h = pred_box[2], pred_box[3]
-    gt_x, gt_y = gt_box[0], gt_box[1]
-    gt_w, gt_h = gt_box[2], gt_box[3]
-
-    # 计算交集的左上角和右下角的x,y坐标
-    inter_x1 = paddle.max(paddle.to_tensor([pred_x - pred_w / 2, gt_x - gt_w / 2]))
-    inter_y1 = paddle.max(paddle.to_tensor([pred_y - pred_h / 2, gt_y - gt_h / 2]))
-    inter_x2 = paddle.min(paddle.to_tensor([pred_x + pred_w / 2, gt_x + gt_w / 2]))
-    inter_y2 = paddle.min(paddle.to_tensor([pred_y + pred_h / 2, gt_y + gt_h / 2]))
-
-    # 计算交集的面积
-    inter_w = paddle.max(paddle.to_tensor([0, inter_x2 - inter_x1]))
-    inter_h = paddle.max(paddle.to_tensor([0, inter_y2 - inter_y1]))
-    inter_area = inter_w * inter_h
-
-    # 计算并集的面积
-    pred_area = pred_w * pred_h
-    gt_area = gt_w * gt_h
-    union_area = pred_area + gt_area - inter_area
-
-    return inter_area / (union_area + 1e-10)
