@@ -152,3 +152,26 @@ class YoloLoss(nn.Layer):
         print(f'total_loss={total_loss}')
         return total_loss
 
+def iou_calc(pred_box, gt_box):
+    pred_x, pred_y = pred_box[0], pred_box[1]
+    pred_w, pred_h = pred_box[2], pred_box[3]
+    gt_x, gt_y = gt_box[0], gt_box[1]
+    gt_w, gt_h = gt_box[2], gt_box[3]
+
+    # 计算交集的左上角和右下角的x,y坐标
+    inter_x1 = paddle.max(paddle.to_tensor([pred_x - pred_w / 2, gt_x - gt_w / 2]))
+    inter_y1 = paddle.max(paddle.to_tensor([pred_y - pred_h / 2, gt_y - gt_h / 2]))
+    inter_x2 = paddle.min(paddle.to_tensor([pred_x + pred_w / 2, gt_x + gt_w / 2]))
+    inter_y2 = paddle.min(paddle.to_tensor([pred_y + pred_h / 2, gt_y + gt_h / 2]))
+
+    # 计算交集的面积
+    inter_w = paddle.max(paddle.to_tensor([0, inter_x2 - inter_x1]))
+    inter_h = paddle.max(paddle.to_tensor([0, inter_y2 - inter_y1]))
+    inter_area = inter_w * inter_h
+
+    # 计算并集的面积
+    pred_area = pred_w * pred_h
+    gt_area = gt_w * gt_h
+    union_area = pred_area + gt_area - inter_area
+
+    return inter_area / (union_area + 1e-10)

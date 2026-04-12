@@ -7,6 +7,7 @@ DATASET_CONFIG = read_yaml('./config.yaml')
 
 class YoloDataset(Dataset):
     def __init__(self, data_path=DATASET_CONFIG['DATASET']['PATH'], fmt='txt', split='train', transform=None):
+        super().__init__()
         self.data_path = data_path
         self.fmt = fmt
         self.transform = transform
@@ -48,91 +49,58 @@ class YoloDataset(Dataset):
     def __getitem__(self, idx):
         img_file, label_file = self.imgs[idx], self.labels[idx]
         img = np.array(Image.open(img_file).convert('RGB'))
-        if self.transform:
-            img = self.transform(img)
         labels, boxes = self._label_processor(label_file)
-        return img, labels, boxes
+        if self.transform:
+            return self.transform(img, labels, boxes)
+        labels = np.column_stack((labels, boxes))
+        return img, labels
 
     def __len__(self):
         return len(self.imgs)
 
 def collate_fn(batch):
-    imgs, labels, boxes = zip(*batch)
+    imgs, labels = zip(*batch)
+    imgs = [paddle.to_tensor(img) if not isinstance(img, paddle.Tensor) else img for img in imgs]
     imgs = paddle.stack(imgs, axis=0)
-    return imgs, labels, boxes
+    return imgs, paddle.to_tensor(labels)
 
 
-def iou_calc(pred_box, gt_box):
-    pred_x, pred_y = pred_box[0], pred_box[1]
-    pred_w, pred_h = pred_box[2], pred_box[3]
-    gt_x, gt_y = gt_box[0], gt_box[1]
-    gt_w, gt_h = gt_box[2], gt_box[3]
+def preprocessor(labels, boxes):
+    s, b, c = DATASET_CONFIG['MODEL']['SPLIT_SIZE'], DATASET_CONFIG['MODEL']['NUM_BOXES'], DATASET_CONFIG['MODEL']['NUM_CLASSES']
 
-    # 计算交集的左上角和右下角的x,y坐标
-    inter_x1 = paddle.max(paddle.to_tensor([pred_x - pred_w / 2, gt_x - gt_w / 2]))
-    inter_y1 = paddle.max(paddle.to_tensor([pred_y - pred_h / 2, gt_y - gt_h / 2]))
-    inter_x2 = paddle.min(paddle.to_tensor([pred_x + pred_w / 2, gt_x + gt_w / 2]))
-    inter_y2 = paddle.min(paddle.to_tensor([pred_y + pred_h / 2, gt_y + gt_h / 2]))
+    if not isinstance(labels, paddle.Tensor):
+        labels = paddle.to_tensor(labels)
+    if not isinstance(boxes, paddle.Tensor):
+        boxes = paddle.to_tensor(boxes)
 
-    # 计算交集的面积
-    inter_w = paddle.max(paddle.to_tensor([0, inter_x2 - inter_x1]))
-    inter_h = paddle.max(paddle.to_tensor([0, inter_y2 - inter_y1]))
-    inter_area = inter_w * inter_h
+    targets = paddle.zeros([s, s, b * 5 + c])
 
-    # 计算并集的面积
-    pred_area = pred_w * pred_h
-    gt_area = gt_w * gt_h
-    union_area = pred_area + gt_area - inter_area
+    for obj in range(labels.shape[0]):  # 遍历每个样本的所有物体
+        x, y, w, h = boxes[obj]
+        cls = labels[obj]
 
-    return inter_area / (union_area + 1e-10)
+        grid_i, grid_j = int(y * s), int(x * s)  # 物体所属网格索引
+        x_grid, y_grid = x * s - grid_j, y * s - grid_i  # 计算锚框的中心坐标相对于网格的坐标（局部归一化坐标）
+        w_grid, h_grid = w * s, h * s  # w * s 代表目标物体的宽度以网格尺寸为单位的相对坐标（局部归一化尺寸）
 
-def preprocessor(labels, boxes, s, b, c, pred_boxes):
-    # pred_boxes: [batch, s, s, b * 5 + c]
-    device = 'cuda' if paddle.cuda.is_available() else 'cpu'
-    batch_size = len(labels)
-    targets = paddle.zeros([batch_size, s, s, b * 5 + c]).to(device)
+        if targets[grid_i, grid_j, 0] == 0:
+            targets[grid_i, grid_j, 0] = 1  # conf=1（表示有物体）
+            targets[grid_i, grid_j, 1:5] = paddle.tensor([x_grid, y_grid, w_grid, h_grid])  # 填充锚框的中心坐标和尺寸（局部归一化边界框）
+            targets[grid_i, grid_j, 5+cls] = 1  # 对应类别的位置设为1
 
-    # 遍历每个样本， 获取类别和锚框坐标
-    for i in range(batch_size):
-        if len(labels[i]) == 0:  # 当前样本无物体则跳过
-            continue
-        sample_labels, sample_boxes = labels[i], boxes[i]
-        if not isinstance(sample_labels, paddle.Tensor):
-            sample_labels = paddle.to_tensor(sample_labels)
-        if not isinstance(sample_boxes, paddle.Tensor):
-            sample_boxes = paddle.to_tensor(sample_boxes)
+    return targets
 
-        sample_labels, sample_boxes = sample_labels.to(device), sample_boxes.to(device)
+def img_scale(w, h):
+    return paddle.vision.transforms.Compose([
+        paddle.vision.transforms.Resize((w, h)),
+        paddle.vision.transforms.ToTensor(),
+    ])
 
-        for j in range(sample_labels.shape[0]):  # 遍历每个样本的所有物体
-            cls = sample_labels[j].item()
-            x, y, w, h = sample_boxes[j]
+class Compose:
+    def __init__(self, transforms):
+        self.transforms = transforms
 
-            """物体所属网格索引
-            绝对坐标列索引：grid_j = int(cx_p / grid_size_w), grid_size_w = w / s
-            相对坐标列索引：grid_j = int(x / (grid_size_w / w)) = int(x / (1 / s)), x = cx_p / w
-            x * s 代表目标物体的中心坐标以网格尺寸为单位的相对坐标
-            """
-            grid_i, grid_j = int(y * s), int(x * s)
-
-            if grid_i >= s: grid_i = s-1
-            if grid_j >= s: grid_j = s-1
-
-            # 计算锚框的中心坐标相对于网格的坐标（局部归一化坐标）
-            x_grid, y_grid = x * s - grid_j, y * s - grid_i
-            # 计算锚框的宽度和高度相对于网格的尺寸（局部归一化尺寸）
-            w_grid, h_grid = w * s, h * s  # w * s 代表目标物体的宽度以网格尺寸为单位的相对坐标
-
-            # 根据IOU选择边界框预测器
-            iou_1 = iou_calc(pred_boxes[i, grid_i, grid_j, :4], paddle.tensor([x, y, w, h]))
-            iou_2 = iou_calc(pred_boxes[i, grid_i, grid_j, 5:9], paddle.tensor([x, y, w, h]))
-            best_pred_idx = paddle.argmax(paddle.to_tensor([iou_1, iou_2])).item()  # 选择IOU最大的锚框的索引
-
-            # 填充边界框部分（x, y, w, h, conf）
-            targets[i, grid_i, grid_j, best_pred_idx * 5 : best_pred_idx * 5 + 4] = paddle.tensor([x_grid, y_grid, w, h])
-            targets[i, grid_i, grid_j, best_pred_idx * 5 + 4] = 1.0  # conf=1（表示有物体）
-
-            # 填充类别部分（one-hot编码）
-            targets[i, grid_i, grid_j, b * 5 + cls] = 1.0  # 对应类别的位置设为1
-
-    return targets  # [batch, s, s, b * 5 + c]
+    def __call__(self, img, labels, boxes):
+            image = self.transforms[0](img)
+            label = self.transforms[1](labels, boxes)
+            return image, label
