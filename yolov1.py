@@ -117,39 +117,50 @@ class YoloLoss(nn.Layer):
 
     def forward(self, preds, labels):
 
-        sum_loss = 0
+        # [s, s, SBC]
+        exist_obj, labels_box, labels_cls = labels[..., 0:1], labels[..., 1:5], labels[..., 10:]
+        pred_box1, pred_box2, pred_cls = preds[..., 1:5], preds[..., 5:10], preds[..., 10:]
 
-        # labels: [batch, 7, 7, SBC]
-        labels_box = labels[..., 1:5]  # [batch, 7, 7, 2, 5]
-        labels_cls = labels[..., 10:]  # [batch, 7, 7, 20]
+        # 筛选IOU更大的预测框（x,y,w,h）值：[s, s, 4]
+        iou1, iou2 = calc_iou(pred_box1, labels_box), calc_iou(pred_box2, labels_box)
+        max_iou = paddle.maximum(iou1, iou2).unsqueeze(2)  # [s, s, 1]
+        iou_compare = (iou1 > iou2).astype('float32').unsqueeze(2)  # [s, s, 1(bool)]，转换后，1为pred_box1，0为pred_box2
+        pred_box = pred_box1 * iou_compare + pred_box2 * (1 - iou_compare)
 
-        # preds: [batch, 7, 7, SBC]
-        pred_box1 = preds[..., 1:5]  # [batch, 7, 7, 2, 5]
-        pred_box2 = preds[..., 5:10]  # [batch, 7, 7, 2, 10]
-        pred_cls = preds[..., 10:]  # [batch, 7, 7, 20]
+        # 筛选有物体的Grid：[s, s, 4]
+        grid_obj_box = pred_box * exist_obj
 
-        # [batch, 7, 7, 2]
-        iou1 = calc_iou(pred_box1, labels_box)
-        iou2 = calc_iou(pred_box2, labels_box)
+        # 计算中心坐标损失：[s, s, 1]
+        center_loss = (self.lambda_coord * self.sse(grid_obj_box[..., 1], labels_box[..., 1]) +
+                       self.sse(grid_obj_box[..., 2], labels_box[..., 2]))
 
-        # 计算中心坐标损失：[batch, 7, 7, 2]
-        center_loss = self.lambda_coord * (((pred_x - target_x) ** 2 + (pred_y - target_y) ** 2)).sum()
-        # 计算宽度和高度损失：[batch, 7, 7, 2]
-        wh_loss = self.lambda_coord * (((paddle.sqrt(paddle.abs(pred_w)) - paddle.sqrt(target_w)) ** 2 + (paddle.sqrt(paddle.abs(pred_h)) - paddle.sqrt(target_h)) ** 2)).sum()
-        # 计算坐标损失：
+        # 计算宽度和高度损失：[s, s, 1]
+        wh_loss = (self.lambda_coord * self.sse(paddle.sign(labels_box[..., 3]) * paddle.sqrt(paddle.abs(grid_obj_box[..., 3]) + 1e-6),  labels_box[..., 3]) +
+                   self.sse(paddle.sign(labels_box[..., 4]) * paddle.sqrt(paddle.abs(grid_obj_box[..., 4]) + 1e-6), labels_box[..., 4]))
+
+        # 计算坐标损失：[s, s, 1]
         coord_loss = center_loss + wh_loss
-        # 计算置信度损失：mask_obj.shape=[batch, 7, 7, 2], mask_obj:paddle.Tensor[bool]
-        mask_obj, mask_noobj = target_conf > 0, target_conf == 0
-        # target_conf[mask_obj]：过滤出有物体的Grid，维度=标注框数量
-        conf_obj_loss = ((pred_conf[mask_obj] - target_conf[mask_obj]) ** 2).sum()
-        # target_conf[mask_noobj]：过滤出无物体的Grid，维度=7*7-标注框数量
-        conf_noobj_loss = self.lambda_noobj * ((pred_conf[mask_noobj] - target_conf[mask_noobj]) ** 2).sum()
-        conf_loss = conf_obj_loss + conf_noobj_loss
+
+        # 计算有物体的Grid置信度损失：[s, s, 1]
+        pred_conf1, pred_conf2 = preds[..., 4:5], preds[..., 9:10]
+        pred_conf = pred_conf1 * iou_compare + pred_conf2 * (1 - iou_compare)
+
+        pred_grid_obj_conf = pred_conf * exist_obj
+        gt_grid_obj_conf = max_iou * exist_obj
+
+        obj_conf_loss = self.sse(pred_grid_obj_conf, gt_grid_obj_conf)
+
+        # 计算无物体的Grid置信度损失：[s, s, 1]
+        exist_no_obj = 1 - exist_obj
+        pred_grid_no_obj_conf1, pred_grid_no_obj_conf2 = pred_conf1 * exist_no_obj, pred_conf2 * exist_no_obj
+        label_grid_no_obj_conf = paddle.zeros_like(pred_grid_no_obj_conf1)
+        no_obj_conf_loss = self.lambda_noobj * (self.sse(pred_grid_no_obj_conf1, label_grid_no_obj_conf) + self.sse(pred_grid_no_obj_conf2, label_grid_no_obj_conf))
+
+        # 计算置信度损失：[s, s, 1]
+        conf_loss = obj_conf_loss + no_obj_conf_loss
 
         # 计算类别损失
-        cls_mask_obj = mask_obj.any(axis=-1)  #每个Grid中，B个预测框只要有一个有物体，则计算CLS损失，cls_mask_obj为True，[batch, 7, 7]
-        cls_loss = ((pred_cls[cls_mask_obj] - target_cls[cls_mask_obj])**2).sum()
+        pred_obj_cls = exist_obj * pred_cls
+        cls_loss = self.sse(pred_obj_cls, labels_cls)
 
-        total_loss = coord_loss + conf_loss + cls_loss
-        print(f'total_loss={total_loss}')
-        return total_loss
+        return coord_loss + conf_loss + cls_loss
