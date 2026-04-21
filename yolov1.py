@@ -118,31 +118,32 @@ class YoloLoss(nn.Layer):
 
     def forward(self, preds, labels):
 
-        # [s, s, SBC]
+        # [batch, s, s, SBC]
         exist_obj, labels_box, labels_cls = labels[..., 0:1], labels[..., 1:5], labels[..., 10:]
         pred_box1, pred_box2, pred_cls = preds[..., 1:5], preds[..., 6:10], preds[..., 10:]
 
-        # 筛选IOU更大的预测框（x,y,w,h）值：[s, s, 4]
+        # 筛选IOU更大的预测框（x,y,w,h）值：[batch, s, s, 4]
         iou1, iou2 = calc_iou(pred_box1, labels_box), calc_iou(pred_box2, labels_box)
-        max_iou = paddle.maximum(iou1, iou2).unsqueeze(2)  # [s, s, 1]
-        iou_compare = (iou1 > iou2).astype('float32').unsqueeze(2)  # [s, s, 1(bool)]，转换后，1为pred_box1，0为pred_box2
+        max_iou = paddle.maximum(iou1, iou2).unsqueeze(3)  # [batch, s, s, 1]
+        iou_compare = (iou1 > iou2).astype('float32').unsqueeze(3)  # [batch, s, s, 1(bool)]，转换后，1为pred_box1，0为pred_box2
+
         pred_box = pred_box1 * iou_compare + pred_box2 * (1 - iou_compare)
 
-        # 筛选有物体的Grid：[s, s, 4]
+        # 筛选有物体的Grid：[batch, s, s, 4]
         grid_obj_box = pred_box * exist_obj
 
-        # 计算中心坐标损失：[s, s, 1]
+        # 计算中心坐标损失：[batch, s, s, 1]
         center_loss = self.lambda_coord * (self.sse(grid_obj_box[..., 0], labels_box[..., 0]) +
                        self.sse(grid_obj_box[..., 1], labels_box[..., 1]))
 
-        # 计算宽度和高度损失：[s, s, 1]
+        # 计算宽度和高度损失：[batch, s, s, 1]
         wh_loss = self.lambda_coord * (self.sse(paddle.sign(labels_box[..., 2]) * paddle.sqrt(paddle.abs(grid_obj_box[..., 2]) + 1e-6),  labels_box[..., 2]) +
                    self.sse(paddle.sign(labels_box[..., 3]) * paddle.sqrt(paddle.abs(grid_obj_box[..., 3]) + 1e-6), labels_box[..., 3]))
 
-        # 计算坐标损失：[s, s, 1]
+        # 计算坐标损失：[batch, s, s, 1]
         coord_loss = center_loss + wh_loss
 
-        # 计算有物体的Grid置信度损失：[s, s, 1]
+        # 计算有物体的Grid置信度损失：[batch, s, s, 1]
         pred_conf1, pred_conf2 = preds[..., 0:1], preds[..., 5:6]
         pred_conf = pred_conf1 * iou_compare + pred_conf2 * (1 - iou_compare)
 
@@ -151,13 +152,13 @@ class YoloLoss(nn.Layer):
 
         obj_conf_loss = self.sse(pred_grid_obj_conf, gt_grid_obj_conf)
 
-        # 计算无物体的Grid置信度损失：[s, s, 1]
+        # 计算无物体的Grid置信度损失：[batch, s, s, 1]
         exist_no_obj = 1 - exist_obj
         pred_grid_no_obj_conf1, pred_grid_no_obj_conf2 = pred_conf1 * exist_no_obj, pred_conf2 * exist_no_obj
         label_grid_no_obj_conf = paddle.zeros_like(pred_grid_no_obj_conf1)
         no_obj_conf_loss = self.lambda_noobj * (self.sse(pred_grid_no_obj_conf1, label_grid_no_obj_conf) + self.sse(pred_grid_no_obj_conf2, label_grid_no_obj_conf))
 
-        # 计算置信度损失：[s, s, 1]
+        # 计算置信度损失：[batch, s, s, 1]
         conf_loss = obj_conf_loss + no_obj_conf_loss
 
         # 计算类别损失

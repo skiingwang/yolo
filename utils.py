@@ -23,7 +23,7 @@ def read_json(path):
 # 计算交并比
 def calc_iou(pred_box, gt_box):
     import paddle
-    # gt_box: [s, s, 4（x, y, w, h）]
+    # gt_box: [batch, s, s, 4（x, y, w, h）]
     gt_x, gt_y = gt_box[..., 0], gt_box[..., 1]
     gt_w, gt_h = gt_box[..., 2], gt_box[..., 3]
     gt_x1, gt_y1 = gt_x - gt_w / 2, gt_y - gt_h / 2
@@ -46,4 +46,4 @@ def calc_iou(pred_box, gt_box):
     gt_area, pred_area = gt_w * gt_h, pred_w * pred_h
     union_area = pred_area + gt_area - inter_area
 
-    return inter_area / (union_area + 1e-6)  # [s, s]
+    return inter_area / (union_area + 1e-6)  # [batch, s, s]
