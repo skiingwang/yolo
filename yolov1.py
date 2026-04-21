@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from doctest import debug
 from typing import TYPE_CHECKING
 from utils import read_yaml, calc_iou
 import paddle, paddle.nn as nn
@@ -119,7 +120,7 @@ class YoloLoss(nn.Layer):
 
         # [s, s, SBC]
         exist_obj, labels_box, labels_cls = labels[..., 0:1], labels[..., 1:5], labels[..., 10:]
-        pred_box1, pred_box2, pred_cls = preds[..., 1:5], preds[..., 5:10], preds[..., 10:]
+        pred_box1, pred_box2, pred_cls = preds[..., 1:5], preds[..., 6:10], preds[..., 10:]
 
         # 筛选IOU更大的预测框（x,y,w,h）值：[s, s, 4]
         iou1, iou2 = calc_iou(pred_box1, labels_box), calc_iou(pred_box2, labels_box)
@@ -131,18 +132,18 @@ class YoloLoss(nn.Layer):
         grid_obj_box = pred_box * exist_obj
 
         # 计算中心坐标损失：[s, s, 1]
-        center_loss = (self.lambda_coord * self.sse(grid_obj_box[..., 1], labels_box[..., 1]) +
-                       self.sse(grid_obj_box[..., 2], labels_box[..., 2]))
+        center_loss = self.lambda_coord * (self.sse(grid_obj_box[..., 0], labels_box[..., 0]) +
+                       self.sse(grid_obj_box[..., 1], labels_box[..., 1]))
 
         # 计算宽度和高度损失：[s, s, 1]
-        wh_loss = (self.lambda_coord * self.sse(paddle.sign(labels_box[..., 3]) * paddle.sqrt(paddle.abs(grid_obj_box[..., 3]) + 1e-6),  labels_box[..., 3]) +
-                   self.sse(paddle.sign(labels_box[..., 4]) * paddle.sqrt(paddle.abs(grid_obj_box[..., 4]) + 1e-6), labels_box[..., 4]))
+        wh_loss = self.lambda_coord * (self.sse(paddle.sign(labels_box[..., 2]) * paddle.sqrt(paddle.abs(grid_obj_box[..., 2]) + 1e-6),  labels_box[..., 2]) +
+                   self.sse(paddle.sign(labels_box[..., 3]) * paddle.sqrt(paddle.abs(grid_obj_box[..., 3]) + 1e-6), labels_box[..., 3]))
 
         # 计算坐标损失：[s, s, 1]
         coord_loss = center_loss + wh_loss
 
         # 计算有物体的Grid置信度损失：[s, s, 1]
-        pred_conf1, pred_conf2 = preds[..., 4:5], preds[..., 9:10]
+        pred_conf1, pred_conf2 = preds[..., 0:1], preds[..., 5:6]
         pred_conf = pred_conf1 * iou_compare + pred_conf2 * (1 - iou_compare)
 
         pred_grid_obj_conf = pred_conf * exist_obj
