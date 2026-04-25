@@ -20,6 +20,17 @@ def read_json(path):
     except json.JSONDecodeError as e:
         return f'{path}文件解析错误！{e}'
 
+# 保存模型权重
+def save_weight(model, path):
+    import paddle
+    paddle.save(model.state_dict(), f'{path}.pdparams')
+
+# 加载模型权重
+def load_weight(model, path):
+    import paddle
+    state_dict = paddle.load(path)
+    model.set_dict(state_dict)
+
 # 计算交并比
 def calc_iou(pred_box, gt_box):
     import paddle
