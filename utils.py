@@ -58,3 +58,57 @@ def calc_iou(pred_box, gt_box):
     union_area = pred_area + gt_area - inter_area
 
     return inter_area / (union_area + 1e-6)  # [batch, s, s]
+
+def calc_kmeans_iou(pred_box, center_box):
+    import paddle
+
+    d = []  # 每个pred_box到每个center_box的距离
+
+    # 计算交集的面积, pred_box: [box_num, 2（w, h）]
+    pred_box_area = pred_box[..., 0:1] * pred_box[..., 1:2]  # [pred_box_num]
+    center_box_area = center_box[..., 0:1] * center_box[..., 1:2]  # [center_box_num]
+
+    for i in range(pred_box.shape[0]):
+        # 计算交集的面积
+        min_width, min_height = paddle.minimum(pred_box[i, 0:1], center_box[..., 0:1]), paddle.minimum(pred_box[i, 1:2], center_box[..., 1:2])
+        inter_area = min_width * min_height  # [center_box_num]
+
+        # 计算并集的面积
+        union_area = pred_box_area[i] + center_box_area - inter_area  # [center_box_num]
+
+        d.append(inter_area / (union_area + 1e-6))  # [center_box_num]
+
+    return paddle.to_tensor(d).squeeze()  # [pred_box_num, center_box_num]
+
+# K-Means聚类生成预测框
+def kmeans_anchor_boxes(boxes, k):
+    import paddle
+    # 从boxes中随机选k个边界框作为初始中心框
+    center_boxes = boxes[paddle.randperm(boxes.shape[0])[:k]]
+
+    # 每个边界框分配的中心框索引（初始值为0）, [box_num]
+    box_center_box_idx = paddle.zeros(boxes.shape[0])
+
+    while True:
+        # 计算每个边界框与所有中心框的IOU
+        ious = calc_kmeans_iou(boxes, center_boxes)
+
+        # 找到每个边界框对应IOU最大的中心框索引（即分配到最近的中心框）
+        box_max_center_box_idx = paddle.argmax(ious, axis=1)
+
+        # 如果聚类分配结果不再变化（收敛状态），退出循环
+        if paddle.all(box_max_center_box_idx == box_center_box_idx):
+            # 按面积从小到大排序中心框
+            return paddle.to_tensor(sorted(center_boxes, key=lambda area: area[0] * area[1], reverse=False))
+
+        else:  # 更新中心框（未收敛状态）
+            center_boxes = paddle.zeros_like(center_boxes)  # 重新初始化中心框
+
+            for i in range(k):
+                # 获取属于当前第i个聚类的所有边界框
+                cls_i_boxes = boxes[paddle.where(box_max_center_box_idx == i)]
+                # 计算属于当前第i个聚类的所有边界框的（width、height）的均值，作为新的中心框
+                center_boxes[i] = paddle.mean(cls_i_boxes, axis=0)
+
+            # 更新上一次的聚类分配结果
+            box_center_box_idx = box_max_center_box_idx.copy()
