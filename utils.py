@@ -87,7 +87,7 @@ def kmeans_anchor_boxes(boxes, k):
     center_boxes = boxes[paddle.randperm(boxes.shape[0])[:k]]
 
     # 每个边界框分配的中心框索引（初始值为0）, [box_num]
-    box_center_box_idx = paddle.zeros(boxes.shape[0])
+    box_center_box_idx = paddle.zeros(boxes.shape[0], dtype='int64')
 
     while True:
         # 计算每个边界框与所有中心框的IOU
@@ -111,4 +111,4 @@ def kmeans_anchor_boxes(boxes, k):
                 center_boxes[i] = paddle.mean(cls_i_boxes, axis=0)
 
             # 更新上一次的聚类分配结果
-            box_center_box_idx = box_max_center_box_idx.copy()
+            box_center_box_idx = box_max_center_box_idx.clone()
