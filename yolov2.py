@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from utils import read_yaml, passthrough
+from utils import read_yaml, passthrough, calc_iou
 import paddle, paddle.nn as nn
 
 if TYPE_CHECKING:
@@ -108,15 +108,118 @@ class Yolo2(nn.Layer):
         x = self.head_2(p)
         return x
 
-# YOLOv1损失函数
-class YoloLoss(nn.Layer):
-    def __init__(self, s=MODEL_CONFIG['MODEL']['SPLIT_SIZE'], b=MODEL_CONFIG['MODEL']['NUM_BOXES'], c=MODEL_CONFIG['MODEL']['NUM_CLASSES'], lambda_coord=5, lambda_noobj=0.5):
+
+# YOLOv2损失函数
+class YoloV2Loss(nn.Layer):
+    def __init__(self, anchors, num_classes=10, lambda_coord=MODEL_CONFIG['LOSS']['LAMBDA_COORD'],
+                 lambda_noobj=MODEL_CONFIG['LOSS']['LAMBDA_NOOBJ'], lambda_obj=MODEL_CONFIG['LOSS']['LAMBDA_OBJ'],
+                 lambda_class=MODEL_CONFIG['LOSS']['LAMBDA_CLASS'], lambda_prior=MODEL_CONFIG['LOSS']['LAMBDA_PRIOR']):
         super().__init__()
-        self.s = s
-        self.b = b
-        self.c = c
+        self.anchors = paddle.to_tensor(anchors, dtype='float32')  # 锚框 [w, h]
+        self.num_anchors = len(anchors)
+        self.num_classes = num_classes
+        self.mse_loss = nn.MSELoss(reduction='sum')
         self.lambda_coord = lambda_coord
         self.lambda_noobj = lambda_noobj
+        self.lambda_obj = lambda_obj
+        self.lambda_class = lambda_class
+        self.lambda_prior = lambda_prior
 
-    def forward(self, pred, target):
-        ...
+    def forward(self, preds, labels):
+        """
+        preds: [N, 125, 13, 13] (假设输入是 5 个框，10 类)，125 = 5 * (4 coords + 1 conf + 10 classes)
+        labels: [N, 13, 13, 5 + C]，前 4 个是 box (x,y,w,h), 第5个是 conf (0或1), 后面是 classes
+        """
+        batch_size, grid_size = preds.shape[0], preds.shape[2]
+
+        # 1. 预测值 (Reshape Predictions)
+        # 从 [N, 125, 13, 13] -> [N, 5, 25, 13, 13]
+        preds = preds.transpose([0, 2, 3, 1]).reshape([batch_size, grid_size, grid_size, self.num_anchors, 4 + 1 + self.num_classes])
+
+        pred_boxes, pred_confs, pred_cls = preds[..., 0:4], preds[..., 4:5], preds[..., 5:]
+
+        # 2. 标签 (Reshape Labels)
+        # labels: [N, 13, 13, 5 + C]
+        label_boxes, label_confs, label_cls = labels[..., 0:4], labels[..., 4:5], labels[..., 5:]
+
+        # 3. 计算 IoU 并分配责任 (Assign Responsibility)
+        # pred_boxes: [N, 13, 13, 5, 4]
+        # label_boxes: [N, 13, 13, 4] -> [N, 13, 13, 1, 1, 4]
+        label_boxes_exp = label_boxes.unsqueeze(3).unsqueeze(3)
+
+        # 计算所有锚框与所有真实框的 IoU
+        # iou: [N, 13, 13, 5, 13, 13]
+        iou = calc_iou(pred_boxes, label_boxes_exp)
+
+        # 对于每个真实框 (GT)，找到 IoU 最大的那个锚框
+        # max_iou_per_gt: [N, 13, 13] (该网格内最高的 IoU)
+        # best_anchor_idx: [N, 13, 13] (负责该 GT 的锚框索引 0-4)
+        max_iou, best_anchor_idx = paddle.max(iou, axis=3)  # 在锚框维度取最大
+        max_iou = max_iou.squeeze(3)  # [N, 13, 13]
+        best_anchor_idx = best_anchor_idx.squeeze(3)  # [N, 13, 13]
+
+        # responsible_mask: [N, 13, 13, 5]，如果某个锚框是负责该网格内物体的，则为 1
+        responsible_mask = paddle.zeros_like(pred_confs)
+        # 使用scatter或者循环填充，这里用简单的索引赋值，best_anchor_idx是标量索引，需要扩展维度
+        idx = paddle.arange(grid_size).unsqueeze(0).expand([batch_size, grid_size])  # [N, 13]
+        # 构造索引 [N, 13, 13, 1]
+        row_idx = idx.unsqueeze(2).expand([batch_size, grid_size, grid_size, 1])
+        col_idx = idx.unsqueeze(1).expand([batch_size, grid_size, grid_size, 1])
+
+        # indices: [N, 13, 13, 1]
+        indices = best_anchor_idx.unsqueeze(3)
+        # values: [N, 13, 13, 1] 全 1
+        values = paddle.ones_like(indices, dtype='float32')
+        # 使用 scatter_ 填充
+        # 注意：scatter_ 需要 indices 是 int64
+        responsible_mask = paddle.zeros([batch_size, grid_size, grid_size, self.num_anchors], dtype='float32')
+        responsible_mask = paddle.scatter_(responsible_mask, 3, indices.astype('int64'), values)
+
+        # 4. 计算损失
+        # 坐标损失 (Coordinate Loss)
+        # 仅对负责的框计算 (responsible_mask == 1)，提取负责框的预测坐标和真实坐标
+        # pred_boxes_resp: [N, 13, 13, 4]
+        pred_boxes_resp = paddle.sum(pred_boxes * responsible_mask, axis=3)
+
+        # 真实坐标 (只取负责的那个 GT 的坐标)
+        pred_wh = paddle.sqrt(paddle.abs(pred_boxes_resp[..., 2:4]) + 1e-6)
+        label_wh = paddle.sqrt(paddle.abs(label_boxes[..., 2:4]) + 1e-6)
+
+        # 坐标损失 (x, y, w, h)
+        coord_loss = self.mse_loss(pred_boxes_resp[..., 0:2], label_boxes[..., 0:2]) + self.mse_loss(pred_wh, label_wh)
+        coord_loss *= self.lambda_coord
+
+        # 1. 有物体的置信度损失 (Object Confidence Loss)
+        # 公式：lambda_obj * (IOU_truth - b_o)^2
+        iou_target = max_iou.unsqueeze(3)  # [N, 13, 13, 1]
+        obj_conf_loss = self.mse_loss(pred_confs * responsible_mask, iou_target * responsible_mask)
+        obj_conf_loss *= self.lambda_obj
+
+        # 2. 无物体的置信度损失 (No Object Confidence Loss) + 先验损失 (Prior Loss)
+        # 条件：Max IoU < Thresh (通常设为 0.6) 或者 simply not responsible
+        # 定义负样本掩码：不是负责框，且 IoU 较低 (或者简单地，不是负责框)
+        noobj_mask = 1 - responsible_mask
+
+        # 置信度部分：目标是 0
+        conf_noobj_loss = self.mse_loss(pred_confs * noobj_mask, paddle.zeros_like(pred_confs))
+        conf_noobj_loss *= self.lambda_noobj
+
+        # 扩展 anchors 到 [N, 13, 13, 5, 4]
+        prior_boxes = self.anchors.unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(
+            [batch_size, grid_size, grid_size, self.num_anchors, 4])
+
+        # 仅计算负样本的 prior loss
+        prior_loss = self.mse_loss(pred_boxes * noobj_mask, prior_boxes * noobj_mask)
+        prior_loss *= self.lambda_prior
+
+        total_conf_loss = conf_noobj_loss + prior_loss
+
+        # 类别损失 (Class Loss)
+        # 仅对负责的框计算
+        cls_loss = self.mse_loss(pred_cls * responsible_mask, label_cls.unsqueeze(3) * responsible_mask)
+        cls_loss *= self.lambda_class
+
+        # 总损失
+        total_loss = coord_loss + obj_conf_loss + total_conf_loss + cls_loss
+
+        return total_loss
