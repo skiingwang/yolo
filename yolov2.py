@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from utils import read_yaml
+from utils import read_yaml, passthrough
 import paddle, paddle.nn as nn
 
 if TYPE_CHECKING:
@@ -17,7 +17,10 @@ class BasicConvLayer(nn.Layer):
     def __init__(self, in_channels, out_channels, kernel_size=1, stride=1, padding=0):
         super().__init__()
         self.conv = nn.Conv2D(in_channels, out_channels, kernel_size, stride, padding, bias=False)
-        self.bn = nn.BatchNorm2D(out_channels)
+        self.bn = nn.BatchNorm2D(
+            num_features=out_channels,
+            weight_attr=paddle.ParamAttr(initializer=paddle.nn.initializer.Normal(0., 0.02), regularizer=paddle.regularizer.L2Decay(0.))
+        )
         self.relu = nn.LeakyReLU(0.1)
 
     def forward(self, x):
@@ -43,41 +46,35 @@ class Yolo2(nn.Layer):
         super().__init__()
         self.num_classes = num_classes
         self.num_boxes = num_boxes
-        self.s = split_size  # 网格大小 7x7
-        self.network_cfg = [
-            (32, 3, 1, 1),
-            'M',
-            (64, 3, 1, 1),
-            'M',
-            (128, 3, 1, 1),
-            (64, 1, 1, 0),
-            (128, 3, 1, 1),
-            'M',
-            (256, 3, 1, 1),
-            (128, 1, 1, 0),
-            (256, 3, 1, 1),
-            'M',
+        self.s = split_size  # 网格大小 13x13
+        self.network_cfg1 = [
+            (32, 3, 1, 1), 'M',  # 416 -> 208
+            (64, 3, 1, 1), 'M',  # 208 -> 104
+            (128, 3, 1, 1), (64, 1, 1, 0), (128, 3, 1, 1), 'M',  # 104 -> 52
+            (256, 3, 1, 1), (128, 1, 1, 0), (256, 3, 1, 1), 'M',  # 52 -> 26
             [
-                (512, 3, 1, 1),
-                (256, 1, 1, 0),
-                2
-            ],
-            (512, 3, 1, 1),
-            'M',
-            [
-                (1024, 3, 1, 1),
-                (512, 1, 1, 0),
-                2
-            ],
-            (1024, 3, 1, 1),
+                (512, 3, 1, 1), (256, 1, 1, 0), 2
+            ]  # 26 -> 26
         ]
-        self.backbone = self._build_backbone(self.network_cfg, in_channels)
-        self.head = self._build_head()
-
-    def forward(self, x):
-        x = self.backbone(x)
-        x = self.head(x)
-        return x
+        self.network_cfg_passthrough = [
+            (512, 3, 1, 1)
+        ]
+        self.network_cfg2 = [
+            'M',
+            [
+                (1024, 3, 1, 1), (512, 1, 1, 0), 2
+            ],
+            (1024, 3, 1, 1)
+        ]
+        self.passthrouth_conv = nn.Conv2D(512, 64, 1, 1, 0)
+        self.backbone_1 = self._build_backbone(self.network_cfg1, in_channels)
+        self.backbone_passthrough = self._build_backbone(self.network_cfg_passthrough, 256)
+        self.backbone_2 = self._build_backbone(self.network_cfg2, 512)
+        self.head_1 = self._build_head()
+        self.head_2 = nn.Sequential(
+            BasicConvLayer(1280, 1024, 3, 1, 1),
+            nn.Conv2D(1024, 5 * (5 + self.num_classes), 1, 1, 0),
+        )
 
     def _build_backbone(self, cfg, in_channels):
         backbone = []
@@ -86,10 +83,10 @@ class Yolo2(nn.Layer):
                 case tuple():
                     backbone.append(BasicConvLayer(in_channels, c[0], c[1], c[2], c[3]))
                     in_channels = c[0]
-                case str():
+                case 'M':
                     backbone.append(nn.MaxPool2D(kernel_size=2, stride=2))
                 case list():
-                    for _ in range(c[2]):
+                    for i in range(c[2]):
                         backbone.append(BasicConvLayer(in_channels, c[0][0], c[0][1], c[0][2], c[0][3]))
                         backbone.append(BasicConvLayer(c[0][0], c[1][0], c[1][1], c[1][2], c[1][3]))
                         in_channels = c[1][0]
@@ -97,10 +94,19 @@ class Yolo2(nn.Layer):
 
     def _build_head(self):
         return nn.Sequential(
-            nn.Conv2D(1024, self.num_classes, 1, 1, 0),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten()
+            BasicConvLayer(1024, 1024, 3, 1, 1),
+            BasicConvLayer(1024, 1024, 3, 1, 1)
         )
+
+    def forward(self, x):
+        x = self.backbone_1(x)
+        y = self.backbone_passthrough(x)
+        y_passthrough = self.passthrouth_conv(y)
+        x = self.backbone_2(y)
+        x = self.head_1(x)
+        p = passthrough(y_passthrough, x)
+        x = self.head_2(p)
+        return x
 
 # YOLOv1损失函数
 class YoloLoss(nn.Layer):
@@ -114,4 +120,3 @@ class YoloLoss(nn.Layer):
 
     def forward(self, pred, target):
         ...
-

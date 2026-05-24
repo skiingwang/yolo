@@ -112,3 +112,10 @@ def kmeans_anchor_boxes(boxes, k):
 
             # 更新上一次的聚类分配结果
             box_center_box_idx = box_max_center_box_idx.clone()
+
+# 特征融合
+def passthrough(high_mtx, low_mtx):
+    import paddle
+    split_width, split_height = high_mtx.shape[2] // low_mtx.shape[2], high_mtx.shape[3] // low_mtx.shape[3]
+    sf = paddle.nn.functional.unfold(high_mtx, kernel_sizes=(split_width, split_height), strides=(split_width, split_height))
+    return paddle.concat([sf.reshape([sf.shape[0], sf.shape[1], sf.shape[2]//low_mtx.shape[2], sf.shape[2]//low_mtx.shape[3]]), low_mtx], axis=1)
