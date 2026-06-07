@@ -119,3 +119,7 @@ def passthrough(high_mtx, low_mtx):
     split_width, split_height = high_mtx.shape[2] // low_mtx.shape[2], high_mtx.shape[3] // low_mtx.shape[3]
     sf = paddle.nn.functional.unfold(high_mtx, kernel_sizes=(split_width, split_height), strides=(split_width, split_height))
     return paddle.concat([sf.reshape([sf.shape[0], sf.shape[1], sf.shape[2]//low_mtx.shape[2], sf.shape[2]//low_mtx.shape[3]]), low_mtx], axis=1)
+
+def upsample(inputs, mode, scale_factor=2):
+    import paddle
+    return paddle.nn.functional.interpolate(inputs, scale_factor=scale_factor, mode=mode)
