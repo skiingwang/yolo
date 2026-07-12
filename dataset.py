@@ -44,11 +44,12 @@ class YoloDataset(Dataset):
                             cls, x, y, w, h = map(float, parts)
                             labels.append(int(cls))
                             boxes.append([x, y, w, h])
-                return np.int64(labels), np.float32(boxes)
+        return np.int64(labels), np.float32(boxes)
 
     def __getitem__(self, idx):
         img_file, label_file = self.imgs[idx], self.labels[idx]
         img = np.array(Image.open(img_file).convert('RGB'))
+        # img = np.transpose(img, (2, 1, 0))
         labels, boxes = self._label_processor(label_file)
         if self.transform:
             return self.transform(img, labels, boxes)
@@ -86,7 +87,7 @@ def preprocessor(labels, boxes):
         if targets[grid_i, grid_j, 0] == 0:
             targets[grid_i, grid_j, 0] = 1  # conf=1（表示有物体）
             targets[grid_i, grid_j, 1:5] = paddle.tensor([x_grid, y_grid, w_grid, h_grid])  # 填充锚框的中心坐标和尺寸（局部归一化边界框）
-            targets[grid_i, grid_j, 5+cls] = 1  # 对应类别的位置设为1
+            targets[grid_i, grid_j, b*5+cls] = 1  # 对应类别的位置设为1
 
     return targets  # [s, s, [conf, x, y, w, h, cls1, cls2, ...]]
 
@@ -101,6 +102,7 @@ class Compose:
         self.transforms = transforms
 
     def __call__(self, img, labels, boxes):
-            image = self.transforms[0](img)
+            image = self.transforms[0](img)  # [3, height, width]
+            image = paddle.transpose(image, [0, 2, 1])
             label = self.transforms[1](labels, boxes)
             return image, label
